@@ -76,6 +76,12 @@ upstream versions. Building locally is still a one-liner if you prefer:
 docker build -t office365-mcp .
 ```
 
+Releases are cut with [`release.sh`](release.sh):
+
+```bash
+./release.sh 1.0.1 "what changed"   # rebuild, push :1.0.1 + :latest, git tag, GitHub release
+```
+
 ## Authenticate (once)
 
 Tokens are written by the app to `~/.mcp-office365` **inside the container**, so
