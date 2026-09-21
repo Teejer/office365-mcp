@@ -4,6 +4,7 @@
 # Usage:
 #   ./release.sh 1.0.1 [notes...]        rebuild + push + tag + GitHub release
 #   ./release.sh 1.0.1 --no-build        push the existing local image as-is
+#   O365_MCP_VERSION=5.2.0 ./release.sh 1.0.1 "bump upstream"
 #
 # What it does:
 #   1. Rebuilds the image (docker build, no cache)
@@ -11,13 +12,13 @@
 #   3. Pushes both tags to Docker Hub
 #   4. Tags git v<version> and pushes to origin
 #   5. Creates a GitHub release (Teejer/office365-mcp)
-#   6. Records the current upstream package version in the release notes
-#      (the image resolves it via npx at container start, not build time)
+#   6. Records the baked-in upstream package version in the release notes
+#
+# The upstream package is baked into the image at build time; its version is
+# the O365_MCP_VERSION build arg (see Dockerfile). Override it per release:
+#   O365_MCP_VERSION=5.2.0 ./release.sh 1.0.1 "upgrade upstream to 5.2.0"
 #
 # Requirements: docker (logged in as teejeer), gh (authenticated), git.
-#
-# Tip: for a reproducible image, pin the upstream in the Dockerfile ENTRYPOINT
-# (e.g. @jbctechsolutions/mcp-office365@5.1.1) before releasing.
 set -euo pipefail
 
 IMAGE_HUB="teejeer/office365-mcp"
@@ -47,22 +48,27 @@ fi
 
 # --- build -------------------------------------------------------------------
 if [[ "$NO_BUILD" -eq 0 ]]; then
-  echo "==> docker build (no cache)"
-  docker build --no-cache -t office365-mcp:latest .
+  echo "==> docker build (no cache, O365_MCP_VERSION=${O365_MCP_VERSION:-Dockerfile default})"
+  if [[ -n "${O365_MCP_VERSION:-}" ]]; then
+    docker build --no-cache --build-arg O365_MCP_VERSION="$O365_MCP_VERSION" -t office365-mcp:latest .
+  else
+    docker build --no-cache -t office365-mcp:latest .
+  fi
 else
   docker inspect office365-mcp:latest >/dev/null || { echo "!! no local office365-mcp:latest to publish"; exit 1; }
   echo "==> skipping build, publishing existing local image"
 fi
 
-# --- show which upstream version the image will use ---------------------------
-# The image resolves the upstream package via npx at container START, so the
-# best available record is whatever is current on npm at release time.
-UPSTREAM_VER=$(curl -s https://registry.npmjs.org/@jbctechsolutions%2fmcp-office365 \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['dist-tags']['latest'])" 2>/dev/null) || UPSTREAM_VER=""
+# --- which upstream version is baked into the image ---------------------------
+# serverInfo reports the resolved upstream package version on MCP initialize.
+UPSTREAM_VER=$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release","version":"0"}}}' \
+  | timeout 60 docker run -i --rm --entrypoint mcp-office365 office365-mcp:latest --preset files 2>/dev/null \
+  | grep -oE '"version":"[0-9]+\.[0-9]+\.[0-9]+"' | tail -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') || UPSTREAM_VER=""
 if [[ -n "$UPSTREAM_VER" ]]; then
-  echo "==> upstream ${PKG} is currently ${UPSTREAM_VER} on npm"
+  echo "==> image has ${PKG}@${UPSTREAM_VER} baked in"
 else
-  echo "==> (could not determine upstream version — continuing)"
+  echo "==> (could not determine baked-in upstream version — continuing)"
 fi
 
 # --- tag & push to docker hub -------------------------------------------------

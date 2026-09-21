@@ -68,12 +68,13 @@ docker pull teejeer/office365-mcp        # or :1.0.0
 ```
 
 Everything below works identically with `teejeer/office365-mcp` in place of
-`office365-mcp`. Caveat: the image installs the upstream package via `npx` at
-container start, so a **rebuild** (not a re-pull) is how you pick up new
-upstream versions. Building locally is still a one-liner if you prefer:
+`office365-mcp`. The upstream package is **baked into the image at build
+time** (pinned via the `O365_MCP_VERSION` build arg, current default `5.1.1`),
+so published tags are reproducible and the container starts instantly with no
+npm fetch. To upgrade upstream: bump the arg and release a new version:
 
 ```bash
-docker build -t office365-mcp .
+docker build --build-arg O365_MCP_VERSION=5.2.0 -t office365-mcp .
 ```
 
 Releases are cut with [`release.sh`](release.sh):
