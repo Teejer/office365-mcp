@@ -40,7 +40,12 @@ cd "$(dirname "$0")"
 
 # --- sanity checks -----------------------------------------------------------
 git diff --quiet --ignore-submodules HEAD -- || { echo "!! uncommitted changes — commit or stash first"; exit 1; }
-[[ -n "$(docker info 2>/dev/null | grep 'Username: teejeer')" ]] || { echo "!! docker not logged in as teejeer"; exit 1; }
+# Live auth check: request a push-scoped token for our repo from the registry.
+# (More reliable than parsing docker info / config.json, which vary by version
+# and credential helper.)
+HUB_USER="${IMAGE_HUB%%/*}"
+docker push "${IMAGE_HUB}:__auth_probe__" 2>&1 | grep -qiE 'denied|unauthorized|no access' \
+  && { echo "!! docker not logged in to Docker Hub as ${HUB_USER} (push denied)"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "!! gh not authenticated"; exit 1; }
 if git ls-remote --tags origin "v${VERSION}" | grep -q .; then
   echo "!! git tag v${VERSION} already exists on origin"; exit 1
