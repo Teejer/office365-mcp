@@ -97,3 +97,14 @@ persist in the mounted dir, so later runs refresh silently. Re-run with
 - No credentials are baked into the image; they arrive via `--env-file`.
 - If a write fails with `GRAPH_PERMISSION_DENIED`, your token predates a scope
   change — re-run the `auth` step.
+- **Schema quirks** (observed in current build):
+  - `list_emails` requires `folder_id` explicitly (e.g. `"inbox"`) — it has no default.
+  - Batch deletes go `prepare_batch_delete_emails` → `confirm_batch_operation`,
+    where `tokens` is an array of `{token_id, email_id}` objects (not plain strings).
+    Validation errors are mislabeled `GRAPH_ERROR`.
+  - `prepare_*` previews may render `timeReceived` with the wrong year (e.g. 2057) —
+    cosmetic only, the underlying items are correct.
+  - There is **no hard-delete/purge tool** — all deletes move items to Deleted
+    Items. Permanently purge via Outlook on the web (Deleted Items → … →
+    "Recover items deleted from this folder" → Purge) or let the 14-day
+    retention age them out.
