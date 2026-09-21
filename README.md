@@ -59,6 +59,23 @@ cp .env.example .env
 # ID — App registrations → your app. chmod 600 .env
 ```
 
+## Use the published image (skip the build)
+
+A ready-built image is on Docker Hub:
+
+```bash
+docker pull teejeer/office365-mcp        # or :1.0.0
+```
+
+Everything below works identically with `teejeer/office365-mcp` in place of
+`office365-mcp`. Caveat: the image installs the upstream package via `npx` at
+container start, so a **rebuild** (not a re-pull) is how you pick up new
+upstream versions. Building locally is still a one-liner if you prefer:
+
+```bash
+docker build -t office365-mcp .
+```
+
 ## Authenticate (once)
 
 Tokens are written by the app to `~/.mcp-office365` **inside the container**, so
