@@ -4,6 +4,16 @@ Container for [`@jbctechsolutions/mcp-office365`](https://github.com/jbctechsolu
 a Microsoft Graph MCP server. Scoped to the presets you actually want — Teams
 is intentionally excluded (that stays on the dedicated `teams` MCP).
 
+> ## Attribution
+>
+> **All credit for the actual MCP server goes to [JBC Tech Solutions, LLC](https://github.com/jbctechsolutions/mcp-office365)**
+> (Joel, `@jbctech`), who wrote and maintains
+> [`@jbctechsolutions/mcp-office365`](https://www.npmjs.com/package/@jbctechsolutions/mcp-office365)
+> (MIT licensed). This repository contains **no server code of its own** —
+> only a Docker wrapper, an Entra app-registration walkthrough, and
+> operational notes from running their package in a container.
+> If you find this useful, go star [their repo](https://github.com/jbctechsolutions/mcp-office365).
+
 ## What's exposed
 
 | Preset | Covers |
@@ -102,6 +112,8 @@ persist in the mounted dir, so later runs refresh silently. Re-run with
 - No credentials are baked into the image; they arrive via `--env-file`.
 - If a write fails with `GRAPH_PERMISSION_DENIED`, your token predates a scope
   change — re-run the `auth` step.
+- **License:** the wrapped upstream package is MIT (JBC Tech Solutions, LLC);
+  see [LICENSE](LICENSE). The wrapper files in this repo are MIT as well.
 - **Schema quirks** (observed in current build):
   - `list_emails` requires `folder_id` explicitly (e.g. `"inbox"`) — it has no default.
   - Batch deletes go `prepare_batch_delete_emails` → `confirm_batch_operation`,
