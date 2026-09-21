@@ -40,8 +40,13 @@ Files.Read.All
 
 ## Configure
 
+> **Note:** keep the `OUTLOOK_MCP_*` variable **names** exactly as they are —
+> the app reads those names. Only the *values* are yours to fill in.
+
 ```bash
-cp .env.example .env   # fill in client + tenant IDs (chmod 600)
+cp .env.example .env
+# Fill in your Entra app's real client (application) ID and tenant (directory)
+# ID — App registrations → your app. chmod 600 .env
 ```
 
 ## Authenticate (once)
