@@ -11,6 +11,13 @@ ARG O365_MCP_VERSION=5.1.1
 RUN npm install -g @jbctechsolutions/mcp-office365@${O365_MCP_VERSION} \
     && npm cache clean --force
 
+# Guard entrypoint: takes a single-instance flock on the state dir (the upstream
+# token cache has no locking and Entra rotates refresh tokens, so two containers
+# sharing one state dir will eventually kill the login) and self-heals a corrupt
+# tokens.json from a rolling backup. See docker-entrypoint.sh for details.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
+
 # Non-root home doubles as the token/state store location.
 RUN useradd --create-home appuser
 USER appuser
@@ -28,4 +35,7 @@ RUN mkdir -p /home/appuser/.mcp-state
 # meetings (free/busy + availability). Shared-mailbox tools ride along with the
 # mail/calendar presets (there is no separate "shared" preset in this build).
 # Teams is intentionally NOT included — that stays on the dedicated teams MCP.
-ENTRYPOINT ["mcp-office365", "--preset", "planner,tasks,mail,calendar,files,meetings"]
+# The default preset lives in CMD so the guard entrypoint can also wrap the
+# `auth` command:  --entrypoint /usr/local/bin/docker-entrypoint.sh <image> auth
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["--preset", "planner,tasks,mail,calendar,files,meetings"]
