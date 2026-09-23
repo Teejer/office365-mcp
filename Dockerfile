@@ -11,6 +11,16 @@ ARG O365_MCP_VERSION=5.1.1
 RUN npm install -g @jbctechsolutions/mcp-office365@${O365_MCP_VERSION} \
     && npm cache clean --force
 
+# Concurrency patch for the upstream token cache (upstream issue #129): a
+# cross-process lock around the whole silent-refresh window + atomic cache
+# writes, so MULTIPLE server instances can safely share ONE login. The patcher
+# anchors on exact upstream strings and FAILS THE BUILD if they move — so when
+# bumping O365_MCP_VERSION above, re-verify patch/upstream-cache-patch.mjs
+# against the new package version before releasing.
+COPY patch/upstream-cache-patch.mjs /tmp/upstream-cache-patch.mjs
+RUN node /tmp/upstream-cache-patch.mjs \
+    && rm /tmp/upstream-cache-patch.mjs
+
 # Guard entrypoint: takes a single-instance flock on the state dir (the upstream
 # token cache has no locking and Entra rotates refresh tokens, so two containers
 # sharing one state dir will eventually kill the login) and self-heals a corrupt

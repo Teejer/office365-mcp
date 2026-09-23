@@ -106,9 +106,9 @@ Releases are cut with [`release.sh`](release.sh):
 Tokens are written by the app to `~/.mcp-office365` **inside the container**, so
 that path must be mounted at a host directory the container can write to.
 
-Make sure **no other office365-mcp container is running** first
-(`docker ps | grep office365-mcp`) — the guard entrypoint will refuse to start
-alongside one, on purpose (see [Token lifetime](#token-lifetime--why-one-container-at-a-time)).
+A fresh sign-in is fine while servers are running (it mints a new grant rather
+than redeeming the shared refresh token), but on images **older than 1.3.0**
+stop the other containers first — see [Token lifetime](#token-lifetime-and-multi-instance-use).
 
 ```bash
 mkdir -p ~/mcp-o365-state && chmod 777 ~/mcp-o365-state
@@ -126,38 +126,51 @@ Follow the printed URL (https://login.microsoft.com/device) + code. Tokens
 persist in the mounted dir, so later runs refresh silently. Re-run with
 `auth --status` to check, `auth --force` to re-consent after scope changes.
 
-## Token lifetime — why one container at a time
+## Token lifetime and multi-instance use
 
-The app already refreshes its access token silently whenever it expires; you
-never need to babysit it. The fragile part is the **refresh token**: Microsoft
-rotates it on every refresh (single-use), and the upstream MSAL cache plugin
-(`~/.mcp-office365/tokens.json`) has **no cross-process locking** and writes the
-file non-atomically. If two containers share one mounted state dir, the moment
-a token refresh happens:
+The app refreshes its access token silently whenever it expires; you never need
+to babysit it. The fragile part is the **refresh token**: Microsoft rotates it on
+every refresh (single-use). Out of the box the upstream MSAL cache plugin
+(`~/.mcp-office365/tokens.json`) has no cross-process locking and writes the
+file non-atomically, so on the stock package two containers sharing one state
+dir destroy the login the moment they refresh at the same time — the loser
+redeems an already-consumed token (`invalid_grant` / `bad_token`, which can also
+make Entra revoke the whole token family), and its failed refresh overwrites
+the winner's new refresh token in the file. That is the "keeps losing
+authorization" failure this image exists to prevent
+([upstream issue #129](https://github.com/jbctechsolutions/mcp-office365/issues/129)).
 
-- the loser refreshes with the already-consumed refresh token → Entra rejects it
-  (`invalid_grant` / `bad_token`) and can revoke the entire token family;
-- msal-node then removes the "bad" refresh token from the cache and **persists
-  that deletion over the file**, wiping the winner's fresh refresh token;
-- every session now reports `AUTH_EXPIRED` until you redo the device-code login.
+**Since image 1.3.0 this build ships a patch that fixes the race, so ANY NUMBER
+of containers may safely share ONE login/state dir.**
+`patch/upstream-cache-patch.mjs` runs at image build time and:
 
-A container killed mid-write (e.g. the harness closes stdin at session end) can
-also leave `tokens.json` truncated, which the plugin reads as "no cached
-account".
+1. wraps each silent-refresh window in a **cross-process lockfile**
+   (`tokens.json.lock`, stolen if stale > 2 min, fail-open with a stderr warning
+   after 45 s so a session never stalls forever). The winner refreshes; the
+   waiter then finds the winner's fresh access token already on disk and returns
+   it **without any second redeem call** — verified against a mock STS that
+   enforces Entra's single-use rotation like the real service;
+2. makes every cache write **atomic** (temp file + rename), so a container
+   killed mid-write can no longer truncate the shared file;
+3. logs a real stderr warning when `tokens.json` exists but won't parse,
+   instead of silently pretending it is a first run.
 
-The bundled `docker-entrypoint.sh` defends against both, from outside the
-upstream code:
+The patch anchors on exact upstream source strings and **fails the build** if a
+new package version moves them — when bumping `O365_MCP_VERSION`, re-verify the
+patch against the new release before publishing.
 
-1. **flock single-instance guard** — a second container sharing the state dir
-   exits immediately with an explanation instead of racing token refreshes.
-   (This applies to containers started through the default entrypoint, i.e. the
-   normal `docker run` forms in this README.)
-2. **Self-heal** — if `tokens.json` is corrupt at startup but the rolling backup
-   `tokens.json.bak` is valid, the backup is restored before the server starts.
-3. **Rolling backup** — while running, `tokens.json` is copied to
+`docker-entrypoint.sh` still adds belt-and-braces around it:
+
+1. **Self-heal** — if `tokens.json` is corrupt at startup (e.g. a cache
+   corrupted by a pre-1.3.0 image) but the rolling backup `tokens.json.bak` is
+   valid, the backup is restored before the server starts.
+2. **Rolling backup** — while running, `tokens.json` is copied to
    `tokens.json.bak` every 60 s (same uid as the writer, no host cron needed).
+3. **Advisory** — prints a note when another container is detected on the same
+   state dir (fine on 1.3.0+; a warning sign for older images).
 
-If the login does die anyway, just re-run the `auth` step above.
+If the login does die (e.g. it was poisoned by an older image before you
+upgraded), just re-run the `auth` step above.
 
 ## Register with OpenCode
 
@@ -181,13 +194,12 @@ If the login does die anyway, just re-run the `auth` step above.
 }
 ```
 
-> **One session at a time.** Enabling this server in two OpenCode sessions (or
-> any two concurrent `docker run`s of this image) shares one token cache and
-> eventually destroys the login — see
-> [Token lifetime](#token-lifetime--why-one-container-at-a-time). The guard
-> entrypoint makes the second session fail fast with a clear message; the MCP
-> will simply show as failed there. Keep it enabled in exactly one session, or
-> give the second session its own state dir **and** its own `auth` login.
+> **Multi-instance is supported since image 1.3.0.** You can enable this server
+> in as many OpenCode sessions as you like — they share the one state dir and
+> the one login, and the built-in refresh lock ([Token
+> lifetime](#token-lifetime-and-multi-instance-use)) keeps their token refreshes
+> from clobbering each other. On **older** images only one session at a time was
+> safe; upgrade everything before enabling a second session.
 
 ## Notes
 
@@ -198,9 +210,10 @@ If the login does die anyway, just re-run the `auth` step above.
   (hence `chmod 777`, or chown to 1001 if you can).
 - No credentials are baked into the image; they arrive via `--env-file`.
 - An `AUTH_EXPIRED` / `session_expired` tool result means the saved login is
-  gone (see [Token lifetime](#token-lifetime--why-one-container-at-a-time)) —
-  re-run the `auth` step. Silent refresh itself needs no babysitting; do **not**
-  add a keep-alive/refresh loop, it would only refresh-race the other sessions.
+  gone (see [Token lifetime](#token-lifetime-and-multi-instance-use)) — re-run
+  the `auth` step. Silent refresh itself needs no babysitting; do **not** add a
+  keep-alive/refresh loop — the app already refreshes on demand, and an extra
+  refresher only adds refresh traffic.
 - If a write fails with `GRAPH_PERMISSION_DENIED`, your token predates a scope
   change — re-run the `auth` step.
 - **License:** the wrapped upstream package is MIT (JBC Tech Solutions, LLC);

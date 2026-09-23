@@ -1,22 +1,22 @@
 #!/bin/sh
 # Entrypoint wrapper for the office365-mcp container.
 #
-# Why this exists: the upstream package's MSAL cache plugin
-# (~/.mcp-office365/tokens.json) has no cross-process locking and writes the
-# file non-atomically. Microsoft refresh tokens are single-use (each refresh
-# consumes the old one), so if two containers share a mounted state dir, the
-# losing refresh hits invalid_grant/bad_token, Entra can revoke the whole token
-# family, and msal-node then persists a cache *without* the refresh token —
-# silently logging every session out. A killed mid-write can also corrupt
-# tokens.json, which the plugin's loader treats as "no cached account".
+# Background: the upstream MSAL cache plugin (~/.mcp-office365/tokens.json)
+# historically had no cross-process locking and wrote the file non-atomically.
+# Microsoft refresh tokens are single-use (each refresh consumes the old one),
+# so two containers racing a refresh used to destroy the login, and a killed
+# mid-write could leave tokens.json truncated. The build now patches the cache
+# (patch/upstream-cache-patch.mjs, upstream issue #129) with a refresh lock and
+# atomic writes, so MULTIPLE containers may share ONE state dir/login.
 #
-# This wrapper defends against both from the outside:
-#   1. flock (non-blocking) on the state dir — a second container exits with a
-#      clear message instead of racing the first one's token refreshes.
-#   2. Startup validation of tokens.json — if it is corrupt but the rolling
-#      backup is valid, the backup is restored before the server starts.
-#   3. A 60s background loop keeps tokens.json.bak rolling while the container
+# What this wrapper still does:
+#   1. Startup validation of tokens.json — if it is corrupt but the rolling
+#      backup is valid, the backup is restored before the server starts
+#      (covers caches corrupted by pre-patch images).
+#   2. A 60s background loop keeps tokens.json.bak rolling while the container
 #      runs (same uid as the writer, so no host-side cron/permissions needed).
+#   3. Detects a concurrent container on the same state dir and prints an
+#      advisory: supported since image 1.3.0, dangerous with older images.
 set -eu
 
 STATE_DIR="/home/appuser/.mcp-office365"
@@ -28,28 +28,29 @@ valid_json() {
     node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$1" 2>/dev/null
 }
 
+backup_atomically() {
+    cp -f "$1" "$2.tmp.$$" 2>/dev/null && mv -f "$2.tmp.$$" "$2" 2>/dev/null || true
+}
+
 mkdir -p "$STATE_DIR"
 
-# --- single-instance lock -----------------------------------------------------
-# The fd stays open across the exec (lock is held for the container's lifetime)
-# and is shared across containers because the bind-mounted file is one inode.
+# --- concurrency advisory ---------------------------------------------------
+# Shared-mode note only: concurrent containers are safe with the refresh-locked
+# cache, but a pre-1.3.0 container sharing this dir can still clobber the login.
 exec 9>>"$LOCK_FILE"
 if ! flock -n 9; then
-    echo "office365-mcp: another office365-mcp container is already using $STATE_DIR." >&2
-    echo "Microsoft rotates refresh tokens on every refresh, and the token cache has" >&2
-    echo "no cross-process locking: running both at once WILL eventually revoke the" >&2
-    echo "saved login. Stop the other container (docker ps | grep office365-mcp) and" >&2
-    echo "retry, or give the second session its own state dir + a fresh 'auth' login." >&2
-    exit 1
+    echo "office365-mcp: note — another office365-mcp container is using $STATE_DIR." >&2
+    echo "office365-mcp: that is supported now (refresh-locked cache), but make sure" >&2
+    echo "office365-mcp: it runs image >= 1.3.0; older images can still clobber the login." >&2
 fi
 
-# --- corrupt-cache self-heal ----------------------------------------------------
+# --- corrupt-cache self-heal --------------------------------------------------
 if [ -f "$TOKENS" ]; then
     if valid_json "$TOKENS"; then
-        cp -f "$TOKENS" "$BACKUP" 2>/dev/null || true
+        backup_atomically "$TOKENS" "$BACKUP"
     elif [ -f "$BACKUP" ] && valid_json "$BACKUP"; then
-        echo "office365-mcp: tokens.json is corrupt (likely killed mid-write);" >&2
-        echo "office365-mcp: restoring last good copy from tokens.json.bak." >&2
+        echo "office365-mcp: tokens.json is corrupt (likely truncated mid-write by an" >&2
+        echo "office365-mcp: older image); restoring last good copy from tokens.json.bak." >&2
         cp -f "$BACKUP" "$TOKENS" 2>/dev/null || true
     else
         echo "office365-mcp: tokens.json is corrupt and no valid backup exists —" >&2
@@ -57,9 +58,9 @@ if [ -f "$TOKENS" ]; then
     fi
 fi
 
-# --- rolling backup while running ------------------------------------------------
+# --- rolling backup while running ---------------------------------------------
 if [ -f "$TOKENS" ]; then
-    ( while sleep 60; do cp -f "$TOKENS" "$BACKUP" 2>/dev/null || true; done ) &
+    ( while sleep 60; do backup_atomically "$TOKENS" "$BACKUP"; done ) &
 fi
 
 exec mcp-office365 "$@"
